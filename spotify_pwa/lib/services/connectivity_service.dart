@@ -12,23 +12,15 @@ class ConnectivityService extends ChangeNotifier {
   }
 
   void _init() {
-    _connectivity.onConnectivityChanged.listen((result) {
-      if (result is List<ConnectivityResult>) {
-        _isOnline = !result.contains(ConnectivityResult.none);
-      } else {
-        _isOnline = result != ConnectivityResult.none;
-      }
+    _connectivity.onConnectivityChanged.listen((List<ConnectivityResult> result) {
+      _isOnline = !result.contains(ConnectivityResult.none);
       notifyListeners();
     });
   }
 
   Future<bool> checkConnection() async {
-    final result = await _connectivity.checkConnectivity();
-    if (result is List<ConnectivityResult>) {
-      _isOnline = !result.contains(ConnectivityResult.none);
-    } else {
-      _isOnline = result != ConnectivityResult.none;
-    }
+    final List<ConnectivityResult> result = await _connectivity.checkConnectivity();
+    _isOnline = !result.contains(ConnectivityResult.none);
     notifyListeners();
     return _isOnline;
   }

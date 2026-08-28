@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import '../services/connectivity_service.dart';
 
 class SpotifyWebViewPage extends StatefulWidget {
   const SpotifyWebViewPage({Key? key}) : super(key: key);
@@ -8,15 +10,62 @@ class SpotifyWebViewPage extends StatefulWidget {
   State<SpotifyWebViewPage> createState() => _SpotifyWebViewPageState();
 }
 
-class _SpotifyWebViewPageState extends State<SpotifyWebViewPage> {
+class _SpotifyWebViewPageState extends State<SpotifyWebViewPage> with WidgetsBindingObserver {
   late final WebViewController _webViewController;
+  late final ConnectivityService _connectivityService;
   bool _isLoading = true;
   String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    
+    _connectivityService = ConnectivityService();
+    _connectivityService.addListener(_onConnectivityChanged);
+    
     _initializeWebView();
+  }
+
+  void _onConnectivityChanged() {
+    if (!_connectivityService.isOnline) {
+      setState(() {
+        _errorMessage = 'No internet connection';
+      });
+    } else if (_errorMessage == 'No internet connection') {
+      // Auto-recover when internet comes back if that was the only error
+      setState(() {
+        _errorMessage = null;
+        _isLoading = true;
+      });
+      _webViewController.reload();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _connectivityService.removeListener(_onConnectivityChanged);
+    _connectivityService.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    switch (state) {
+      case AppLifecycleState.resumed:
+        print('App resumed');
+        break;
+      case AppLifecycleState.paused:
+        print('App paused');
+        break;
+      case AppLifecycleState.detached:
+        print('App detached');
+        break;
+      default:
+        break;
+    }
   }
 
   void _initializeWebView() {
@@ -25,7 +74,6 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage> {
         request.grant();
       },
     )
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (String url) {
@@ -99,37 +147,80 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(
-            Icons.error_outline,
-            size: 48,
-            color: Color(0xFF1DB954),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'Connection Error',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Text(
-              _errorMessage ?? 'Unable to load Spotify',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium,
+          Container(
+            width: 80,
+            height: 80,
+            decoration: BoxDecoration(
+              color: const Color(0xFF282828),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: const Icon(
+              Icons.error_outline,
+              size: 48,
+              color: Color(0xFF1DB954),
             ),
           ),
           const SizedBox(height: 24),
-          ElevatedButton.icon(
-            onPressed: () {
-              _initializeWebView();
-              setState(() {});
-            },
-            icon: const Icon(Icons.refresh),
-            label: const Text('Retry'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF1DB954),
-              foregroundColor: const Color(0xFF191414),
+          Text(
+            'Connection Error',
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+              color: const Color(0xFF1DB954),
             ),
+          ),
+          const SizedBox(height: 12),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Text(
+              _errorMessage ?? 'Unable to load Spotify. Please check your internet connection.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: const Color(0xFFB3B3B3),
+              ),
+            ),
+          ),
+          const SizedBox(height: 32),
+          Column(
+            children: [
+              SizedBox(
+                width: 200,
+                child: ElevatedButton.icon(
+                  onPressed: () async {
+                    await _connectivityService.checkConnection();
+                    if (_connectivityService.isOnline) {
+                      setState(() {
+                        _errorMessage = null;
+                        _isLoading = true;
+                      });
+                      _webViewController.reload();
+                    }
+                  },
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1DB954),
+                    foregroundColor: const Color(0xFF191414),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 24,
+                      vertical: 12,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextButton.icon(
+                onPressed: () {
+                  setState(() {
+                    _errorMessage = null;
+                  });
+                  _webViewController.goBack();
+                },
+                icon: const Icon(Icons.arrow_back),
+                label: const Text('Go Back'),
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFF1DB954),
+                ),
+              ),
+            ],
           ),
         ],
       ),
