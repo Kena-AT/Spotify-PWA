@@ -1,3 +1,7 @@
+/* ============================================================
+   Spotify PWA — styles.css (optimized, unused rules removed)
+   ============================================================ */
+
 :root {
   --primary: #1DB954;
   --bg-primary: #191414;
@@ -5,18 +9,18 @@
   --text-primary: #FFFFFF;
   --text-secondary: #B3B3B3;
   --accent: #1ed760;
-  
+
   --spacing-xs: 4px;
   --spacing-sm: 8px;
   --spacing-md: 16px;
   --spacing-lg: 24px;
   --spacing-xl: 32px;
-  
+
   --base-font-size: 16px;
   font-size: var(--base-font-size);
 }
 
-* {
+*, *::before, *::after {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
@@ -26,6 +30,7 @@ html {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
@@ -33,11 +38,9 @@ body {
   height: 100%;
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   overflow: hidden;
-  margin: 0;
-  padding: 0;
-  
+
   /* Safe areas for notched devices */
   padding-top: max(0px, env(safe-area-inset-top));
   padding-bottom: max(0px, env(safe-area-inset-bottom));
@@ -56,12 +59,12 @@ body {
 h1 { font-size: clamp(24px, 6vw, 36px); }
 h2 { font-size: clamp(20px, 5vw, 28px); }
 h3 { font-size: clamp(16px, 4vw, 24px); }
-body, p { font-size: clamp(14px, 3vw, 18px); }
+p  { font-size: clamp(14px, 3vw, 18px); }
 small { font-size: clamp(12px, 2.5vw, 14px); }
 
-/* Buttons & touch targets */
-button, a[role="button"], input[type="button"], input[type="submit"] {
-  min-height: max(44px, 10vh);
+/* Buttons & touch targets — 44px minimum per WCAG */
+button, a[role="button"] {
+  min-height: 44px;
   min-width: 44px;
   padding: var(--spacing-md) var(--spacing-lg);
   background-color: var(--primary);
@@ -71,51 +74,29 @@ button, a[role="button"], input[type="button"], input[type="submit"] {
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, transform 0.1s ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
-button:hover, button:focus {
+button:hover, button:focus-visible {
   background-color: var(--accent);
-  transform: scale(1.02);
+  outline: none;
 }
 
 button:active {
   transform: scale(0.98);
 }
 
-/* Modal sizing */
-dialog, .modal {
-  max-width: min(90vw, 500px);
-  max-height: 90vh;
-  overflow-y: auto;
-  background-color: var(--bg-secondary);
-  border: none;
-  border-radius: 8px;
-  padding: var(--spacing-lg);
+/* Webview-specific overrides */
+.webview-context {
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  touch-action: pan-y;
 }
 
-/* Flex layouts */
-.flex-container {
-  display: flex;
-  gap: var(--spacing-md);
-  flex-wrap: wrap;
-}
-
-.flex-center {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-/* Prevent over-scroll on mobile */
-html {
-  overscroll-behavior: none;
-}
-
-/* Media queries for larger screens */
+/* Responsive spacing */
 @media (min-width: 481px) {
   :root {
     --spacing-md: 20px;
@@ -130,8 +111,9 @@ html {
   }
 }
 
-/* Webview detection (optional) */
-.webview-context {
-  -webkit-font-smoothing: antialiased;
-  -webkit-text-size-adjust: 100%;
+/* Landscape on small phones — reduce top padding */
+@media (orientation: landscape) and (max-height: 500px) {
+  body {
+    padding-top: 0;
+  }
 }
