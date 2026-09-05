@@ -6,7 +6,7 @@ void main() {
 }
 
 class SpotifyPWAApp extends StatelessWidget {
-  const SpotifyPWAApp({Key? key}) : super(key: key);
+  const SpotifyPWAApp({super.key});
 
   @override
   Widget build(BuildContext context) {
