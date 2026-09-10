@@ -4,6 +4,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.content.Intent
+import android.os.Build
 
 class MainActivity : FlutterActivity() {
   companion object {
@@ -34,7 +35,9 @@ class MainActivity : FlutterActivity() {
             val artist = call.argument<String>("artist") ?: ""
             val isPlaying = call.argument<Boolean>("isPlaying") ?: false
             val albumArtUrl = call.argument<String>("albumArtUrl")
-            updatePlaybackState(title, artist, isPlaying, albumArtUrl)
+            val position = (call.argument<Number>("position") ?: 0).toLong()
+            val duration = (call.argument<Number>("duration") ?: 0).toLong()
+            updatePlaybackState(title, artist, isPlaying, albumArtUrl, position, duration)
             result.success(true)
           }
           else -> result.notImplemented()
@@ -44,23 +47,62 @@ class MainActivity : FlutterActivity() {
   }
 
   private fun startAudioService() {
-    val intent = Intent(this, AudioService::class.java)
-    startForegroundService(intent)
+    try {
+      val intent = Intent(this, AudioService::class.java)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        startForegroundService(intent)
+      } else {
+        startService(intent)
+      }
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
   }
 
   private fun stopAudioService() {
-    val intent = Intent(this, AudioService::class.java)
-    stopService(intent)
+    try {
+      val intent = Intent(this, AudioService::class.java).apply {
+        action = AudioService.ACTION_STOP
+      }
+      startService(intent)
+    } catch (e: Exception) {
+      val intent = Intent(this, AudioService::class.java)
+      stopService(intent)
+    }
   }
 
-  private fun updatePlaybackState(title: String, artist: String, isPlaying: Boolean, albumArtUrl: String?) {
-    val intent = Intent(this, AudioService::class.java)
-    intent.putExtra("title", title)
-    intent.putExtra("artist", artist)
-    intent.putExtra("isPlaying", isPlaying)
-    if (albumArtUrl != null) {
-      intent.putExtra("albumArtUrl", albumArtUrl)
+  private fun updatePlaybackState(
+    title: String,
+    artist: String,
+    isPlaying: Boolean,
+    albumArtUrl: String?,
+    position: Long,
+    duration: Long
+  ) {
+    try {
+      val intent = Intent(this, AudioService::class.java).apply {
+        putExtra("title", title)
+        putExtra("artist", artist)
+        putExtra("isPlaying", isPlaying)
+        if (albumArtUrl != null) {
+          putExtra("albumArtUrl", albumArtUrl)
+        }
+        putExtra("position", position)
+        putExtra("duration", duration)
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        startForegroundService(intent)
+      } else {
+        startService(intent)
+      }
+    } catch (e: Exception) {
+      e.printStackTrace()
     }
-    startForegroundService(intent)
+  }
+
+  override fun onDestroy() {
+    audioMethodChannel = null
+    stopAudioService()
+    super.onDestroy()
   }
 }
