@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'dart:convert';
@@ -40,9 +41,8 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
   }
 
   void _setupAudioService() async {
-    await AudioService.startBackgroundAudio();
-    
-    // Setup handler for native playback control commands
+    // Only register handler for native playback control commands.
+    // AudioService is started lazily when audio playback is detected.
     await AudioService.handlePlaybackControl(
       _handlePlaybackControl,
       _webViewController,
@@ -101,6 +101,7 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
     WidgetsBinding.instance.removeObserver(this);
     _connectivityService.removeListener(_onConnectivityChanged);
     _connectivityService.dispose();
+    AudioService.stopBackgroundAudio();
     super.dispose();
   }
 
@@ -160,11 +161,13 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
               _errorMessage = null;
             });
             _startLoadingTimeout();
+            _injectAdBlockerScript();
           },
           onPageFinished: (String url) {
             _loadingTimeout?.cancel();
             setState(() => _isLoading = false);
             _injectViewportScript();
+            _injectAdBlockerScript();
             _injectPlaybackBridgeScript();
           },
           onWebResourceError: (WebResourceError error) {
@@ -192,12 +195,29 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
           try {
             final data = jsonDecode(message.message);
             if (data['type'] == 'playback_state') {
-              AudioService.updatePlaybackState(
-                title: data['title'] ?? 'Unknown',
-                artist: data['artist'] ?? 'Unknown',
-                isPlaying: data['isPlaying'] ?? false,
-                albumArtUrl: data['albumArtUrl'],
-              );
+              final isPlaying = data['isPlaying'] == true;
+              final title = (data['title'] as String?)?.trim();
+              final artist = (data['artist'] as String?)?.trim();
+
+              final hasValidTitle = title != null &&
+                  title.isNotEmpty &&
+                  title != 'Spotify' &&
+                  title != 'Unknown' &&
+                  !title.toLowerCase().contains('advertisement');
+
+              if (hasValidTitle) {
+                AudioService.updatePlaybackState(
+                  title: title,
+                  artist: (artist != null && artist != 'Unknown') ? artist : '',
+                  isPlaying: isPlaying,
+                  albumArtUrl: data['albumArtUrl'],
+                  position: data['position'] != null ? (data['position'] as num).toInt() : null,
+                  duration: data['duration'] != null ? (data['duration'] as num).toInt() : null,
+                );
+              } else if (!isPlaying) {
+                // If nothing is playing and no valid track, ensure notification/service is dismissed
+                AudioService.stopBackgroundAudio();
+              }
             }
           } catch (e) {
             debugPrint('Error parsing playback state: $e');
@@ -221,12 +241,169 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
         if (!meta) {
           meta = document.createElement('meta');
           meta.name = 'viewport';
-          document.head.appendChild(meta);
         }
         meta.setAttribute('content', 
           'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover');
       
         window.dispatchEvent(new Event('pwa-ready'));
+      })();
+    ''');
+  }
+
+  Future<void> _injectAdBlockerScript() async {
+    await _webViewController.runJavaScript(r'''
+      (function() {
+        if (window.__spotifyAdBlockerInstalled) return;
+        window.__spotifyAdBlockerInstalled = true;
+
+        // 1. Cosmetic CSS Injection: Hide all visual ad slots, banners & upgrade popups
+        function injectAdBlockCSS() {
+          if (document.getElementById('spotify-adblock-styles')) return;
+          const style = document.createElement('style');
+          style.id = 'spotify-adblock-styles';
+          style.textContent = `
+            [data-testid="ad-placeholder"],
+            [data-testid="action-bar-ad"],
+            [data-testid="ad-display-name"],
+            [data-testid="ad-feedback-menu"],
+            .main-leaderboardComponent-container,
+            .main-topBar-upgradeButton,
+            [aria-label="Upgrade to Premium"],
+            a[href*="/upgrade"],
+            button[data-testid="upgrade-button"],
+            .upgrade-button,
+            [data-testid="billboard-ad"],
+            [data-testid="inactivity-dialog"],
+            .sponsor-container,
+            #ad-iframe,
+            div[data-testid*="ad-"] {
+              display: none !important;
+              visibility: hidden !important;
+              height: 0 !important;
+              max-height: 0 !important;
+              pointer-events: none !important;
+              opacity: 0 !important;
+            }
+          `;
+          (document.head || document.documentElement).appendChild(style);
+        }
+        injectAdBlockCSS();
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', injectAdBlockCSS);
+        }
+
+        // 2. API / Network Interception: Intercept ad-fetching endpoints
+        const isAdUrl = (url) => {
+          if (typeof url !== 'string') return false;
+          return (
+            url.includes('/ad-logic/') ||
+            url.includes('/ads/v') ||
+            url.includes('/v1/ads') ||
+            url.includes('/ad-feedback/') ||
+            url.includes('audio-ak-spotify-com.akamaized.net/ad') ||
+            url.includes('doubleclick.net')
+          );
+        };
+
+        if (window.fetch) {
+          const origFetch = window.fetch;
+          window.fetch = async function(...args) {
+            const url = args[0] ? (typeof args[0] === 'string' ? args[0] : args[0].url || '') : '';
+            if (isAdUrl(url)) {
+              return new Response(JSON.stringify({
+                ads: [],
+                ad: null,
+                tokens: [],
+                client_timestamp: Date.now()
+              }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+              });
+            }
+            return origFetch.apply(this, args);
+          };
+        }
+
+        if (window.XMLHttpRequest) {
+          const origOpen = XMLHttpRequest.prototype.open;
+          XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+            this._url = url;
+            return origOpen.apply(this, [method, url, ...rest]);
+          };
+
+          const origSend = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.send = function(...args) {
+            if (this._url && isAdUrl(this._url.toString())) {
+              Object.defineProperty(this, 'status', { value: 200, writable: false });
+              Object.defineProperty(this, 'readyState', { value: 4, writable: false });
+              Object.defineProperty(this, 'responseText', {
+                value: JSON.stringify({ ads: [], ad: null }),
+                writable: false
+              });
+              this.dispatchEvent(new Event('readystatechange'));
+              this.dispatchEvent(new Event('load'));
+              return;
+            }
+            return origSend.apply(this, args);
+          };
+        }
+
+        // 3. Audio Ad Detector, Fast-Forwarder & Auto-Muter
+        let isAdMuted = false;
+
+        function checkAndSkipAds() {
+          try {
+            const title = (document.title || '').toLowerCase();
+            const metaTitle = (navigator.mediaSession && navigator.mediaSession.metadata && navigator.mediaSession.metadata.title)
+              ? navigator.mediaSession.metadata.title.toLowerCase()
+              : '';
+
+            const hasAdTitle = title.includes('advertisement') || metaTitle.includes('advertisement');
+            const hasAdElement = 
+              document.querySelector('[data-testid="ad-display-name"]') !== null ||
+              document.querySelector('[aria-label*="Advertisement"]') !== null ||
+              document.querySelector('[data-testid="track-info-advertiser"]') !== null;
+
+            const isAd = hasAdTitle || hasAdElement;
+            const mediaEls = document.querySelectorAll('audio, video');
+
+            if (isAd) {
+              isAdMuted = true;
+              for (const el of mediaEls) {
+                // Instantly silence audio ad
+                el.muted = true;
+                el.volume = 0;
+                // Accelerate ad playback speed to max allowed (16x)
+                el.playbackRate = 16.0;
+                // Fast-forward to end if duration is available
+                if (el.duration && !isNaN(el.duration) && isFinite(el.duration)) {
+                  el.currentTime = el.duration;
+                }
+              }
+
+              // Trigger skip to next song
+              const skipBtn = document.querySelector(
+                '[data-testid="control-button-skip-forward"], button[aria-label="Next"], button[aria-label="Skip forward"], [data-testid="next-button"]'
+              );
+              if (skipBtn) {
+                skipBtn.click();
+              } else if (window._spotifyHandlers && typeof window._spotifyHandlers['nexttrack'] === 'function') {
+                try { window._spotifyHandlers['nexttrack']({ action: 'nexttrack' }); } catch (e) {}
+              }
+            } else if (isAdMuted) {
+              // Regular song has resumed — restore volume and playback speed
+              isAdMuted = false;
+              for (const el of mediaEls) {
+                el.muted = false;
+                el.playbackRate = 1.0;
+                el.volume = 1.0;
+              }
+            }
+          } catch (e) {}
+        }
+
+        // Check every 150ms for instant reaction to ad events
+        setInterval(checkAndSkipAds, 150);
       })();
     ''');
   }
@@ -239,91 +416,237 @@ class PlaybackBridge {
     this.interval = null;
     this.initialized = false;
   }
+
   init() {
     if (this.initialized) return;
+
+    this.hookMediaSession();
     this.startObserver();
     window.addEventListener('playback-control', this.onNativeControl.bind(this));
+
     this.initialized = true;
   }
+
+  hookMediaSession() {
+    if (!navigator.mediaSession) return;
+
+    window._spotifyHandlers = window._spotifyHandlers || {};
+    const origSetActionHandler = navigator.mediaSession.setActionHandler.bind(navigator.mediaSession);
+
+    navigator.mediaSession.setActionHandler = function(action, handler) {
+      window._spotifyHandlers[action] = handler;
+      return origSetActionHandler(action, handler);
+    };
+  }
+
   startObserver() {
     if (this.interval) clearInterval(this.interval);
     this.interval = setInterval(() => this.detectPlaybackState(), 1000);
     this.detectPlaybackState();
   }
+
   detectPlaybackState() {
     try {
       const state = this.extractPlaybackState();
       if (!state) return;
-      if (JSON.stringify(state) !== JSON.stringify(this.lastState)) {
+
+      if (!this.lastState ||
+          this.lastState.title !== state.title ||
+          this.lastState.artist !== state.artist ||
+          this.lastState.isPlaying !== state.isPlaying ||
+          this.lastState.albumArtUrl !== state.albumArtUrl) {
         this.lastState = state;
         this.sendToNative(state);
       }
-    } catch (error) {}
+    } catch (e) {}
   }
+
   extractPlaybackState() {
-    let title = 'Unknown';
-    let artist = 'Unknown';
+    let title = '';
+    let artist = '';
     let albumArtUrl = null;
     let isPlaying = false;
+    let position = 0;
+    let duration = 0;
 
-    // Method 1: MediaSession API (Highly robust for mobile and desktop)
+    // Strategy 1: Read MediaSession metadata directly (Set by Spotify)
     if (navigator.mediaSession && navigator.mediaSession.metadata) {
       const meta = navigator.mediaSession.metadata;
-      if (meta.title) title = meta.title;
-      if (meta.artist) artist = meta.artist;
+      if (meta.title && meta.title.trim().length > 0) {
+        title = meta.title.trim();
+      }
+      if (meta.artist && meta.artist.trim().length > 0) {
+        artist = meta.artist.trim();
+      }
       if (meta.artwork && meta.artwork.length > 0) {
         albumArtUrl = meta.artwork[meta.artwork.length - 1].src;
       }
-      isPlaying = navigator.mediaSession.playbackState === 'playing';
-      return { title, artist, isPlaying, albumArtUrl, timestamp: Date.now() };
+      if (navigator.mediaSession.playbackState === 'playing') {
+        isPlaying = true;
+      }
     }
 
-    // Method 2: DOM fallback
-    const nowPlaying = document.querySelector('[data-testid="now-playing-widget"], #now-playing-bar, [data-testid="bottom-bar"]');
-    if (nowPlaying) {
-      const titleElement = nowPlaying.querySelector('[data-testid="track-title"], .track-name, [aria-label="Now playing:"]');
-      const artistElement = nowPlaying.querySelector('[data-testid="track-artist"], .artist-name');
-      if (titleElement) title = titleElement.textContent.trim();
-      if (artistElement) artist = artistElement.textContent.trim();
-      const imgElement = nowPlaying.querySelector('img');
-      if (imgElement && imgElement.src) albumArtUrl = imgElement.src;
-      
-      const pauseButton = document.querySelector('[data-testid="control-button-pause"], [data-testid="pause-button"], button[aria-label="Pause"], .spoticon-pause-16');
-      isPlaying = !!(pauseButton && !pauseButton.hidden);
-      
-      return { title, artist, isPlaying, albumArtUrl, timestamp: Date.now() };
+    // Strategy 2: Parse document.title
+    // When Spotify plays a song, document.title is always "Track • Artist" or "Track • Artist | Spotify"
+    if (!title && document.title && document.title.includes('•')) {
+      const cleaned = document.title.replace(/\s*\|\s*Spotify/i, '');
+      const parts = cleaned.split('•');
+      if (parts.length >= 2) {
+        title = parts[0].trim();
+        artist = parts.slice(1).join('•').trim();
+      }
     }
 
-    return null;
+    // Strategy 3: Check Spotify DOM now-playing elements (Desktop & Mobile)
+    if (!title) {
+      const trackLinks = document.querySelectorAll('a[href*="/track/"], [data-testid="nowplaying-track-link"], [data-testid="context-item-info-title"], [data-testid="track-info-name"]');
+      for (const el of trackLinks) {
+        const text = el.textContent ? el.textContent.trim() : '';
+        if (text && text.length > 0 && !text.includes('Spotify')) {
+          title = text;
+          break;
+        }
+      }
+    }
+
+    if (!artist) {
+      const artistLinks = document.querySelectorAll('a[href*="/artist/"], [data-testid="context-item-info-artist"], [data-testid="context-item-info-subtitles"], [data-testid="track-info-artists"]');
+      for (const el of artistLinks) {
+        const text = el.textContent ? el.textContent.trim() : '';
+        if (text && text.length > 0) {
+          artist = text;
+          break;
+        }
+      }
+    }
+
+    if (!albumArtUrl) {
+      const img = document.querySelector('footer img[src*="scdn.co"], [data-testid="now-playing-widget"] img, [data-testid="cover-art-image"], img[src*="image/ab67616d"]');
+      if (img && img.src) {
+        albumArtUrl = img.src;
+      }
+    }
+
+    // Determine playing state
+    // A) Check pause button in DOM (Pause button being visible means media is PLAYING)
+    const pauseButton = document.querySelector(
+      '[data-testid="control-button-playpause"][aria-label*="Pause"], [data-testid="control-button-pause"], [data-testid="pause-button"], button[aria-label="Pause"], .spoticon-pause-16'
+    );
+    if (pauseButton && !pauseButton.hidden && pauseButton.offsetParent !== null) {
+      isPlaying = true;
+    }
+
+    // B) Check audio/video elements
+    const mediaEls = document.querySelectorAll('audio, video');
+    for (const el of mediaEls) {
+      if (!el.paused && el.currentTime > 0) {
+        isPlaying = true;
+      }
+      if (el.duration && !isNaN(el.duration)) {
+        duration = Math.floor(el.duration * 1000);
+        position = Math.floor(el.currentTime * 1000);
+      }
+    }
+
+    // If no real title was found or an ad is active, don't publish an ad notification
+    if (!title || title === 'Spotify' || title === 'Unknown' || title.toLowerCase().includes('advertisement')) {
+      return null;
+    }
+
+    return {
+      title: title,
+      artist: artist,
+      isPlaying: isPlaying,
+      albumArtUrl: albumArtUrl,
+      position: position,
+      duration: duration
+    };
   }
+
   sendToNative(state) {
     if (!window.NativeChannel) return;
     try {
       window.NativeChannel.postMessage(JSON.stringify({ type: 'playback_state', ...state }));
-    } catch (error) {}
+    } catch (e) {}
   }
+
   onNativeControl(event) {
     const action = event.detail?.action;
     if (action) this.executeControl(action);
   }
+
   executeControl(action) {
+    console.log('[PlaybackBridge] Executing control:', action);
+
+    // 1. Try Spotify's registered MediaSession handlers
+    const handlers = window._spotifyHandlers || {};
+    if (action === 'play' && typeof handlers['play'] === 'function') {
+      try { handlers['play']({ action: 'play' }); return; } catch (e) {}
+    }
+    if (action === 'pause' && typeof handlers['pause'] === 'function') {
+      try { handlers['pause']({ action: 'pause' }); return; } catch (e) {}
+    }
+    if (action === 'next' && typeof handlers['nexttrack'] === 'function') {
+      try { handlers['nexttrack']({ action: 'nexttrack' }); return; } catch (e) {}
+    }
+    if (action === 'previous' && typeof handlers['previoustrack'] === 'function') {
+      try { handlers['previoustrack']({ action: 'previoustrack' }); return; } catch (e) {}
+    }
+
+    // 2. Fallback: DOM Buttons
     switch (action) {
-      case 'play': this.clickButton(['[data-testid="control-button-play"]', '[data-testid="play-button"]', 'button[aria-label="Play"]', '.spoticon-play-16']); break;
-      case 'pause': this.clickButton(['[data-testid="control-button-pause"]', '[data-testid="pause-button"]', 'button[aria-label="Pause"]', '.spoticon-pause-16']); break;
-      case 'next': this.clickButton(['[data-testid="control-button-skip-forward"]', '[data-testid="next-button"]', 'button[aria-label="Next"]', '.spoticon-skip-forward-16']); break;
-      case 'previous': this.clickButton(['[data-testid="control-button-skip-back"]', '[data-testid="previous-button"]', 'button[aria-label="Previous"]', '.spoticon-skip-back-16']); break;
+      case 'play':
+        this.clickButton([
+          '[data-testid="control-button-playpause"][aria-label*="Play"]',
+          '[data-testid="control-button-play"]',
+          '[data-testid="play-button"]',
+          'button[aria-label="Play"]',
+          '[data-testid="control-button-playpause"]'
+        ]);
+        break;
+      case 'pause':
+        this.clickButton([
+          '[data-testid="control-button-playpause"][aria-label*="Pause"]',
+          '[data-testid="control-button-pause"]',
+          '[data-testid="pause-button"]',
+          'button[aria-label="Pause"]',
+          '[data-testid="control-button-playpause"]'
+        ]);
+        break;
+      case 'next':
+        this.clickButton([
+          '[data-testid="control-button-skip-forward"]',
+          'button[aria-label="Next"]',
+          'button[aria-label="Skip forward"]',
+          '[data-testid="next-button"]'
+        ]);
+        break;
+      case 'previous':
+        this.clickButton([
+          '[data-testid="control-button-skip-back"]',
+          'button[aria-label="Previous"]',
+          'button[aria-label="Skip back"]',
+          '[data-testid="previous-button"]'
+        ]);
+        break;
+    }
+
+    // 3. Fallback: Media elements
+    if (action === 'pause') {
+      document.querySelectorAll('audio, video').forEach(el => el.pause());
+    } else if (action === 'play') {
+      document.querySelectorAll('audio, video').forEach(el => el.play().catch(() => {}));
     }
   }
+
   clickButton(selectors) {
-    try {
-      for (const selector of selectors) {
-        const button = document.querySelector(selector);
-        if (button && !button.hidden && !button.disabled) {
-          button.click();
-          break;
-        }
+    for (const sel of selectors) {
+      const btn = document.querySelector(sel);
+      if (btn && !btn.hidden && !btn.disabled) {
+        btn.click();
+        return;
       }
-    } catch (error) {}
+    }
   }
 }
 if (!window.playbackBridge) {
@@ -335,22 +658,34 @@ if (!window.playbackBridge) {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF191414),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.only(top: 8.0),
-          child: Stack(
-            children: [
-              WebViewWidget(controller: _webViewController),
-              if (_isLoading)
-                const Center(
-                  child: CircularProgressIndicator(
-                    color: Color(0xFF1DB954),
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (bool didPop, dynamic result) async {
+        if (didPop) return;
+        if (await _webViewController.canGoBack()) {
+          await _webViewController.goBack();
+        } else {
+          // If no previous page in web history, minimize/exit app
+          SystemNavigator.pop();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFF191414),
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 8.0),
+            child: Stack(
+              children: [
+                WebViewWidget(controller: _webViewController),
+                if (_isLoading)
+                  const Center(
+                    child: CircularProgressIndicator(
+                      color: Color(0xFF1DB954),
+                    ),
                   ),
-                ),
-              if (_errorMessage != null) _buildErrorWidget(),
-            ],
+                if (_errorMessage != null) _buildErrorWidget(),
+              ],
+            ),
           ),
         ),
       ),
