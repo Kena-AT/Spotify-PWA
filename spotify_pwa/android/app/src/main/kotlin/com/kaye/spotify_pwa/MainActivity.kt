@@ -44,6 +44,31 @@ class MainActivity : FlutterActivity() {
         }
       }
     }
+
+    // Setup general platform method channel
+    MethodChannel(
+      flutterEngine.dartExecutor.binaryMessenger,
+      "com.kaye.spotify_pwa/platform"
+    ).setMethodCallHandler { call, result ->
+      when (call.method) {
+        "getPlatformVersion" -> result.success("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+        "getBatteryLevel" -> {
+          val batteryManager = getSystemService(BATTERY_SERVICE) as? android.os.BatteryManager
+          val level = batteryManager?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+          result.success(level)
+        }
+        "isBatteryOptimizationDisabled" -> {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(POWER_SERVICE) as? android.os.PowerManager
+            val isIgnoring = pm?.isIgnoringBatteryOptimizations(packageName) ?: false
+            result.success(isIgnoring)
+          } else {
+            result.success(true)
+          }
+        }
+        else -> result.notImplemented()
+      }
+    }
   }
 
   private fun startAudioService() {
