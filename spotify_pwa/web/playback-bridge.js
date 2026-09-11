@@ -62,13 +62,23 @@ class PlaybackBridge {
     let position = 0;
     let duration = 0;
 
-    // Strategy 1: Read MediaSession metadata directly (Set by Spotify)
+    // Strategy 1: Parse document.title first (most reliable on Spotify Web: "Track • Artist | Spotify")
+    if (document.title && document.title.includes('•')) {
+      const cleaned = document.title.replace(/\s*\|\s*Spotify/i, '');
+      const parts = cleaned.split('•');
+      if (parts.length >= 2) {
+        title = parts[0].trim();
+        artist = parts.slice(1).join('•').trim();
+      }
+    }
+
+    // Strategy 2: Read MediaSession metadata directly (Set by Spotify)
     if (navigator.mediaSession && navigator.mediaSession.metadata) {
       const meta = navigator.mediaSession.metadata;
-      if (meta.title && meta.title.trim().length > 0) {
+      if (!title && meta.title && meta.title.trim().length > 0 && !meta.title.toLowerCase().includes('advertisement')) {
         title = meta.title.trim();
       }
-      if (meta.artist && meta.artist.trim().length > 0) {
+      if (!artist && meta.artist && meta.artist.trim().length > 0 && meta.artist.toLowerCase() !== 'unknown') {
         artist = meta.artist.trim();
       }
       if (meta.artwork && meta.artwork.length > 0) {
@@ -79,36 +89,20 @@ class PlaybackBridge {
       }
     }
 
-    // Strategy 2: Parse document.title
-    // When Spotify plays a song, document.title is always "Track • Artist" or "Track • Artist | Spotify"
-    if (!title && document.title && document.title.includes('•')) {
-      const cleaned = document.title.replace(/\s*\|\s*Spotify/i, '');
-      const parts = cleaned.split('•');
-      if (parts.length >= 2) {
-        title = parts[0].trim();
-        artist = parts.slice(1).join('•').trim();
-      }
-    }
-
-    // Strategy 3: Check Spotify DOM now-playing elements (Desktop & Mobile)
-    if (!title) {
-      const trackLinks = document.querySelectorAll('a[href*="/track/"], [data-testid="nowplaying-track-link"], [data-testid="context-item-info-title"], [data-testid="track-info-name"]');
-      for (const el of trackLinks) {
-        const text = el.textContent ? el.textContent.trim() : '';
-        if (text && text.length > 0 && !text.includes('Spotify')) {
-          title = text;
-          break;
+    // Strategy 3: Check Spotify DOM now-playing elements strictly inside now-playing widget
+    const playerBar = document.querySelector('[data-testid="now-playing-widget"], footer, [data-testid="context-item-info-title"]');
+    if (playerBar) {
+      if (!title) {
+        const trackLink = playerBar.querySelector('a[href*="/track/"], [data-testid="nowplaying-track-link"], [data-testid="context-item-info-title"]');
+        if (trackLink && trackLink.textContent && !trackLink.textContent.includes('Spotify')) {
+          title = trackLink.textContent.trim();
         }
       }
-    }
 
-    if (!artist) {
-      const artistLinks = document.querySelectorAll('a[href*="/artist/"], [data-testid="context-item-info-artist"], [data-testid="context-item-info-subtitles"], [data-testid="track-info-artists"]');
-      for (const el of artistLinks) {
-        const text = el.textContent ? el.textContent.trim() : '';
-        if (text && text.length > 0) {
-          artist = text;
-          break;
+      if (!artist) {
+        const artistLink = playerBar.querySelector('a[href*="/artist/"], [data-testid="context-item-info-artist"], [data-testid="context-item-info-subtitles"]');
+        if (artistLink && artistLink.textContent) {
+          artist = artistLink.textContent.trim();
         }
       }
     }
@@ -157,10 +151,14 @@ class PlaybackBridge {
   }
 
   sendToNative(state) {
-    if (!window.NativeChannel) return;
-    try {
-      window.NativeChannel.postMessage(JSON.stringify({ type: 'playback_state', ...state }));
-    } catch (e) {}
+    const payload = JSON.stringify({ type: 'playback_state', ...state });
+    if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+      window.flutter_inappwebview.callHandler('NativeChannel', payload);
+    } else if (window.NativeChannel) {
+      try {
+        window.NativeChannel.postMessage(payload);
+      } catch (e) {}
+    }
   }
 
   onNativeControl(event) {
