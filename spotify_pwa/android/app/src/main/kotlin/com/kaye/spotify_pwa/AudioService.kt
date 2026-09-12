@@ -11,7 +11,9 @@ import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import java.net.URL
 import java.util.concurrent.Executors
@@ -24,6 +26,7 @@ class AudioService : Service() {
     const val ACTION_PAUSE = "com.kaye.spotify_pwa.PAUSE"
     const val ACTION_NEXT = "com.kaye.spotify_pwa.NEXT"
     const val ACTION_PREVIOUS = "com.kaye.spotify_pwa.PREVIOUS"
+    const val ACTION_STOP = "com.kaye.spotify_pwa.STOP"
     const val ACTION_UPDATE = "com.kaye.spotify_pwa.UPDATE"
   }
 
@@ -33,8 +36,11 @@ class AudioService : Service() {
   private var currentArtist = ""
   private var currentAlbumArtUrl: String? = null
   private var currentAlbumArtBitmap: Bitmap? = null
+  private var currentPosition: Long = 0L
+  private var currentDuration: Long = 0L
 
   private val executorService = Executors.newSingleThreadExecutor()
+  private val mainHandler = Handler(Looper.getMainLooper())
 
   override fun onCreate() {
     super.onCreate()
@@ -63,12 +69,14 @@ class AudioService : Service() {
       isActive = true
       setPlaybackState(
         PlaybackStateCompat.Builder()
-          .setState(PlaybackStateCompat.STATE_PAUSED, 0L, 1f)
+          .setState(PlaybackStateCompat.STATE_PAUSED, 0L, 0f)
           .setActions(
             PlaybackStateCompat.ACTION_PLAY or
             PlaybackStateCompat.ACTION_PAUSE or
+            PlaybackStateCompat.ACTION_PLAY_PAUSE or
             PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+            PlaybackStateCompat.ACTION_STOP
           )
           .build()
       )
@@ -77,9 +85,11 @@ class AudioService : Service() {
   }
 
   private fun buildNotification(): android.app.Notification {
-    val intent = Intent(this, MainActivity::class.java)
-    val pendingIntent = PendingIntent.getActivity(
-      this, 0, intent,
+    val openIntent = Intent(this, MainActivity::class.java).apply {
+      flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+    }
+    val contentPendingIntent = PendingIntent.getActivity(
+      this, 0, openIntent,
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
@@ -97,11 +107,20 @@ class AudioService : Service() {
       )
     }
 
+    val stopAction = NotificationCompat.Action(
+      android.R.drawable.ic_menu_close_clear_cancel,
+      "Close",
+      getPendingIntentForAction(ACTION_STOP)
+    )
+
+    val deletePendingIntent = getPendingIntentForAction(ACTION_STOP)
+
     val builder = NotificationCompat.Builder(this, CHANNEL_ID)
       .setContentTitle(currentTitle)
-      .setContentText(currentArtist)
-      .setSmallIcon(android.R.drawable.ic_media_play) // TODO: use app icon if available
-      .setContentIntent(pendingIntent)
+      .setContentText(if (currentArtist.isNotEmpty()) currentArtist else "Spotify")
+      .setSmallIcon(R.drawable.ic_notification)
+      .setContentIntent(contentPendingIntent)
+      .setDeleteIntent(deletePendingIntent)
       .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
       .addAction(
         android.R.drawable.ic_media_previous,
@@ -114,6 +133,7 @@ class AudioService : Service() {
         "Next",
         getPendingIntentForAction(ACTION_NEXT)
       )
+      .addAction(stopAction)
       .setStyle(
         androidx.media.app.NotificationCompat.MediaStyle()
           .setMediaSession(mediaSession.sessionToken)
@@ -139,66 +159,127 @@ class AudioService : Service() {
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    if (intent == null) return START_STICKY
+    if (intent == null) return START_NOT_STICKY
 
     when (intent.action) {
-      ACTION_PLAY -> sendCommandToFlutter("play")
-      ACTION_PAUSE -> sendCommandToFlutter("pause")
+      ACTION_PLAY -> onPlayRequested()
+      ACTION_PAUSE -> onPauseRequested()
       ACTION_NEXT -> sendCommandToFlutter("next")
       ACTION_PREVIOUS -> sendCommandToFlutter("previous")
+      ACTION_STOP -> stopAudioService()
       else -> {
-        // Handle update
         val title = intent.getStringExtra("title")
-        if (title != null) {
+        if (title != null && title.isNotEmpty()) {
           val artist = intent.getStringExtra("artist") ?: ""
           val playing = intent.getBooleanExtra("isPlaying", false)
           val albumArtUrl = intent.getStringExtra("albumArtUrl")
-          updatePlaybackStateInternal(title, artist, playing, albumArtUrl)
+          val position = intent.getLongExtra("position", 0L)
+          val duration = intent.getLongExtra("duration", 0L)
+          updatePlaybackStateInternal(title, artist, playing, albumArtUrl, position, duration)
         }
       }
     }
-    return START_STICKY
+    return START_NOT_STICKY
   }
 
-  private fun sendCommandToFlutter(command: String) {
-    MainActivity.audioMethodChannel?.invokeMethod(
-      "handlePlaybackControl",
-      mapOf("action" to command)
-    )
-  }
-
-  private fun updatePlaybackStateInternal(title: String, artist: String, playing: Boolean, albumArtUrl: String?) {
-    currentTitle = title
-    currentArtist = artist
-    isPlaying = playing
-
-    // Update MediaSession
+  private fun onPlayRequested() {
+    isPlaying = true
     val playbackState = PlaybackStateCompat.Builder()
-      .setState(
-        if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
-        0L,
-        1f
-      )
+      .setState(PlaybackStateCompat.STATE_PLAYING, currentPosition, 1.0f)
       .setActions(
         PlaybackStateCompat.ACTION_PLAY or
         PlaybackStateCompat.ACTION_PAUSE or
+        PlaybackStateCompat.ACTION_PLAY_PAUSE or
         PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+        PlaybackStateCompat.ACTION_STOP
+      )
+      .build()
+    mediaSession.setPlaybackState(playbackState)
+    startForeground(NOTIFICATION_ID, buildNotification())
+    sendCommandToFlutter("play")
+  }
+
+  private fun onPauseRequested() {
+    isPlaying = false
+    val playbackState = PlaybackStateCompat.Builder()
+      .setState(PlaybackStateCompat.STATE_PAUSED, currentPosition, 0f)
+      .setActions(
+        PlaybackStateCompat.ACTION_PLAY or
+        PlaybackStateCompat.ACTION_PAUSE or
+        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+        PlaybackStateCompat.ACTION_STOP
       )
       .build()
     mediaSession.setPlaybackState(playbackState)
 
-    // Update metadata (for lock screen)
+    // Detach from foreground so the notification is immediately dismissible
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+      stopForeground(STOP_FOREGROUND_DETACH)
+    } else {
+      @Suppress("DEPRECATION")
+      stopForeground(false)
+    }
+    val manager = getSystemService(NotificationManager::class.java)
+    manager?.notify(NOTIFICATION_ID, buildNotification())
+
+    sendCommandToFlutter("pause")
+  }
+
+  private fun sendCommandToFlutter(command: String) {
+    mainHandler.post {
+      MainActivity.audioMethodChannel?.invokeMethod(
+        "handlePlaybackControl",
+        mapOf("action" to command)
+      )
+    }
+  }
+
+  private fun updatePlaybackStateInternal(
+    title: String,
+    artist: String,
+    playing: Boolean,
+    albumArtUrl: String?,
+    position: Long,
+    duration: Long
+  ) {
+    currentTitle = title
+    currentArtist = artist
+    isPlaying = playing
+    currentPosition = position
+    currentDuration = duration
+
+    val state = if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
+    val playbackState = PlaybackStateCompat.Builder()
+      .setState(state, position, if (playing) 1.0f else 0.0f)
+      .setActions(
+        PlaybackStateCompat.ACTION_PLAY or
+        PlaybackStateCompat.ACTION_PAUSE or
+        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+        PlaybackStateCompat.ACTION_STOP
+      )
+      .build()
+    mediaSession.setPlaybackState(playbackState)
+
     val metadataBuilder = MediaMetadataCompat.Builder()
       .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
       .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+      .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "Spotify")
+
+    if (duration > 0) {
+      metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
+    }
 
     if (currentAlbumArtBitmap != null) {
       metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, currentAlbumArtBitmap)
+      metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, currentAlbumArtBitmap)
     }
     mediaSession.setMetadata(metadataBuilder.build())
 
-    // If album art changed, fetch it. Otherwise just update notification.
     if (albumArtUrl != null && albumArtUrl != currentAlbumArtUrl) {
       currentAlbumArtUrl = albumArtUrl
       fetchAlbumArtAndNotify(albumArtUrl, metadataBuilder)
@@ -218,15 +299,13 @@ class AudioService : Service() {
         
         currentAlbumArtBitmap = bitmap
         
-        // Update metadata with bitmap
         metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
+        metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, bitmap)
         mediaSession.setMetadata(metadataBuilder.build())
         
-        // Notify on main thread if needed, but NotificationManager is thread-safe
         notifyUpdated()
       } catch (e: Exception) {
         e.printStackTrace()
-        // Still notify without new image
         notifyUpdated()
       }
     }
@@ -234,20 +313,67 @@ class AudioService : Service() {
 
   private fun notifyUpdated() {
     val manager = getSystemService(NotificationManager::class.java)
-    manager?.notify(NOTIFICATION_ID, buildNotification())
+    val notification = buildNotification()
+
+    if (isPlaying) {
+      startForeground(NOTIFICATION_ID, notification)
+    } else {
+      // Paused: detach foreground so notification can be swiped away
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        stopForeground(STOP_FOREGROUND_DETACH)
+      } else {
+        @Suppress("DEPRECATION")
+        stopForeground(false)
+      }
+      manager?.notify(NOTIFICATION_ID, notification)
+    }
+  }
+
+  fun stopAudioService() {
+    isPlaying = false
+    mediaSession.isActive = false
+    val playbackState = PlaybackStateCompat.Builder()
+      .setState(PlaybackStateCompat.STATE_STOPPED, 0L, 0f)
+      .build()
+    mediaSession.setPlaybackState(playbackState)
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+      stopForeground(STOP_FOREGROUND_REMOVE)
+    } else {
+      @Suppress("DEPRECATION")
+      stopForeground(true)
+    }
+    val manager = getSystemService(NotificationManager::class.java)
+    manager?.cancel(NOTIFICATION_ID)
+    stopSelf()
+  }
+
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    super.onTaskRemoved(rootIntent)
+    // App was removed from recents: stop service immediately
+    stopAudioService()
   }
 
   private inner class MediaSessionCallback : MediaSessionCompat.Callback() {
-    override fun onPlay() = sendCommandToFlutter("play")
-    override fun onPause() = sendCommandToFlutter("pause")
+    override fun onPlay() = onPlayRequested()
+    override fun onPause() = onPauseRequested()
     override fun onSkipToNext() = sendCommandToFlutter("next")
     override fun onSkipToPrevious() = sendCommandToFlutter("previous")
+    override fun onStop() = stopAudioService()
   }
 
   override fun onDestroy() {
     executorService.shutdown()
+    mediaSession.isActive = false
     mediaSession.release()
-    stopForeground(STOP_FOREGROUND_REMOVE)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+      stopForeground(STOP_FOREGROUND_REMOVE)
+    } else {
+      @Suppress("DEPRECATION")
+      stopForeground(true)
+    }
+    val manager = getSystemService(NotificationManager::class.java)
+    manager?.cancel(NOTIFICATION_ID)
     super.onDestroy()
   }
 
