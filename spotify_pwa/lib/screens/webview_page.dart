@@ -37,6 +37,10 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
   late final CacheManagerService _cacheManagerService;
   late final KeyboardShortcutService _keyboardService;
   final FocusNode _keyboardFocusNode = FocusNode();
+  Offset? _floatingButtonOffset;
+
+  static const double _kSwipeThreshold = 80.0;
+  static const double _kSwipeVelocityThreshold = 300.0;
 
   bool _isLoading = true;
   String? _errorMessage;
@@ -757,6 +761,13 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
 
   @override
   Widget build(BuildContext context) {
+    final screenSize = MediaQuery.sizeOf(context);
+    final defaultOffset = Offset(
+      screenSize.width > 80 ? screenSize.width - 76 : 16,
+      12,
+    );
+    final currentOffset = _floatingButtonOffset ?? defaultOffset;
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (bool didPop, dynamic result) async {
@@ -883,11 +894,71 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
                   ),
                 if (_errorMessage != null) _buildErrorWidget(),
 
-                // Floating Quick Access Button
+                // ── Phone gesture zone: bottom player bar (swipe ←/→ for tracks) ──
                 Positioned(
-                  top: 10,
-                  right: 12,
-                  child: _buildFloatingQuickToolsButton(),
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  height: 90,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onHorizontalDragEnd: (details) {
+                      final velocity = details.primaryVelocity ?? 0;
+                      final dx = details.localPosition.dx - (screenSize.width / 2);
+                      if (velocity.abs() > _kSwipeVelocityThreshold ||
+                          dx.abs() > _kSwipeThreshold) {
+                        if (velocity < 0) {
+                          // Swipe left → next
+                          _handlePlaybackControl('next');
+                          _showGestureHint('Next track ⏭');
+                        } else {
+                          // Swipe right → previous
+                          _handlePlaybackControl('previous');
+                          _showGestureHint('Previous track ⏮');
+                        }
+                      }
+                    },
+                  ),
+                ),
+
+                // ── Phone gesture zone: top edge (swipe ↓ to open Quick Tools) ──
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  height: 36,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onVerticalDragEnd: (details) {
+                      final velocity = details.primaryVelocity ?? 0;
+                      if (velocity > _kSwipeVelocityThreshold) {
+                        _openSettingsSheet();
+                      }
+                    },
+                  ),
+                ),
+
+                // Movable & Floating Quick Access Button
+                Positioned(
+                  left: currentOffset.dx,
+                  top: currentOffset.dy,
+                  child: GestureDetector(
+                    onPanUpdate: (details) {
+                      setState(() {
+                        final newX = (currentOffset.dx + details.delta.dx).clamp(
+                          8.0,
+                          (screenSize.width - 70.0).clamp(8.0, double.infinity),
+                        );
+                        final newY = (currentOffset.dy + details.delta.dy).clamp(
+                          8.0,
+                          (screenSize.height - 60.0).clamp(8.0, double.infinity),
+                        );
+                        _floatingButtonOffset = Offset(newX, newY);
+                      });
+                    },
+                    onTap: _openSettingsSheet,
+                    child: _buildFloatingQuickToolsButton(),
+                  ),
                 ),
               ],
             ),
@@ -899,51 +970,46 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
 }
 
   Widget _buildFloatingQuickToolsButton() {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: _openSettingsSheet,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0xEE181818),
         borderRadius: BorderRadius.circular(20),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: const Color(0xDD181818),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0x661DB954), width: 1),
-            boxShadow: const [
-              BoxShadow(
-                color: Colors.black54,
-                blurRadius: 8,
-                offset: Offset(0, 2),
-              ),
-            ],
+        border: Border.all(color: const Color(0x881DB954), width: 1.2),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black54,
+            blurRadius: 10,
+            offset: Offset(0, 3),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.tune, color: Color(0xFF1DB954), size: 16),
-              ListenableBuilder(
-                listenable: _sleepTimerService,
-                builder: (context, _) {
-                  if (_sleepTimerService.state.isActive) {
-                    return Padding(
-                      padding: const EdgeInsets.only(left: 6.0),
-                      child: Text(
-                        _sleepTimerService.state.formattedRemaining,
-                        style: const TextStyle(
-                          color: Colors.orangeAccent,
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    );
-                  }
-                  return const SizedBox.shrink();
-                },
-              ),
-            ],
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.drag_indicator, color: Colors.white38, size: 14),
+          const SizedBox(width: 4),
+          const Icon(Icons.tune, color: Color(0xFF1DB954), size: 16),
+          ListenableBuilder(
+            listenable: _sleepTimerService,
+            builder: (context, _) {
+              if (_sleepTimerService.state.isActive) {
+                return Padding(
+                  padding: const EdgeInsets.only(left: 6.0),
+                  child: Text(
+                    _sleepTimerService.state.formattedRemaining,
+                    style: const TextStyle(
+                      color: Colors.orangeAccent,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                );
+              }
+              return const SizedBox.shrink();
+            },
           ),
-        ),
+        ],
       ),
     );
   }
@@ -1053,6 +1119,29 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
         cacheManagerService: _cacheManagerService,
         webViewController: _webViewController,
         onOfflineModeChanged: () => _webViewController?.reload(),
+      ),
+    );
+  }
+
+  void _showGestureHint(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        backgroundColor: const Color(0xFF282828),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 100, left: 60, right: 60),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(milliseconds: 900),
+        elevation: 6,
       ),
     );
   }

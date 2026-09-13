@@ -16,13 +16,43 @@ enum ShortcutAction {
 class KeyboardShortcutService {
   final void Function(ShortcutAction action) onAction;
 
+  // Track repeated key events for long-press simulation on hardware volume keys.
+  int _volumeUpRepeatCount = 0;
+  int _volumeDownRepeatCount = 0;
+  static const int _kLongPressRepeatThreshold = 4;
+
   KeyboardShortcutService({required this.onAction});
 
   bool handleKeyEvent(KeyEvent event) {
-    if (event is! KeyDownEvent) return false;
-
     final key = event.logicalKey;
 
+    // ── Long-press volume keys for track skip (phone hardware buttons) ──
+    if (event is KeyRepeatEvent) {
+      if (key == LogicalKeyboardKey.audioVolumeUp) {
+        _volumeUpRepeatCount++;
+        if (_volumeUpRepeatCount == _kLongPressRepeatThreshold) {
+          onAction(ShortcutAction.nextTrack);
+          return true;
+        }
+        return false;
+      } else if (key == LogicalKeyboardKey.audioVolumeDown) {
+        _volumeDownRepeatCount++;
+        if (_volumeDownRepeatCount == _kLongPressRepeatThreshold) {
+          onAction(ShortcutAction.previousTrack);
+          return true;
+        }
+        return false;
+      }
+    }
+
+    if (event is KeyUpEvent) {
+      if (key == LogicalKeyboardKey.audioVolumeUp) _volumeUpRepeatCount = 0;
+      if (key == LogicalKeyboardKey.audioVolumeDown) _volumeDownRepeatCount = 0;
+    }
+
+    if (event is! KeyDownEvent) return false;
+
+    // ── PC / Desktop keyboard shortcuts ──
     if (key == LogicalKeyboardKey.space ||
         key == LogicalKeyboardKey.mediaPlayPause) {
       onAction(ShortcutAction.togglePlayPause);
