@@ -39,9 +39,6 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
   final FocusNode _keyboardFocusNode = FocusNode();
   Offset? _floatingButtonOffset;
 
-  static const double _kSwipeThreshold = 80.0;
-  static const double _kSwipeVelocityThreshold = 300.0;
-
   bool _isLoading = true;
   String? _errorMessage;
 
@@ -753,11 +750,65 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
         } else if (!isPlaying) {
           AudioService.stopBackgroundAudio();
         }
+      } else if (data['type'] == 'gesture') {
+        final action = data['action'];
+        if (action == 'swipe_left') {
+          _handlePlaybackControl('next');
+          _showGestureHint('Next track ⏭');
+        } else if (action == 'swipe_right') {
+          _handlePlaybackControl('previous');
+          _showGestureHint('Previous track ⏮');
+        } else if (action == 'swipe_down') {
+          _openSettingsSheet();
+        }
       }
     } catch (e) {
-      debugPrint('Error parsing playback state: $e');
+      debugPrint('Error parsing playback/gesture state: $e');
     }
   }
+
+  static const String _gestureInjectionScript = r'''
+  (function() {
+    let startX = 0;
+    let startY = 0;
+    
+    document.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+      }
+    }, {passive: true});
+
+    document.addEventListener('touchend', (e) => {
+      if (e.changedTouches.length === 1) {
+        const endX = e.changedTouches[0].clientX;
+        const endY = e.changedTouches[0].clientY;
+        const diffX = endX - startX;
+        const diffY = endY - startY;
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        
+        // Swipe down from top 80px (for Quick Tools)
+        if (startY < 80 && diffY > 60 && Math.abs(diffX) < 60) {
+          if (window.flutter_inappwebview) {
+            window.flutter_inappwebview.callHandler('NativeChannel', JSON.stringify({ type: 'gesture', action: 'swipe_down' }));
+          }
+        }
+        
+        // Swipe left/right on bottom 120px (player bar area)
+        if (startY > h - 120 && Math.abs(diffX) > 60 && Math.abs(diffY) < 60) {
+          if (window.flutter_inappwebview) {
+            if (diffX < 0) {
+              window.flutter_inappwebview.callHandler('NativeChannel', JSON.stringify({ type: 'gesture', action: 'swipe_left' }));
+            } else {
+              window.flutter_inappwebview.callHandler('NativeChannel', JSON.stringify({ type: 'gesture', action: 'swipe_right' }));
+            }
+          }
+        }
+      }
+    }, {passive: true});
+  })();
+  ''';
 
   @override
   Widget build(BuildContext context) {
@@ -812,6 +863,10 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
                     ),
                     UserScript(
                       source: _playbackBridgeScript,
+                      injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                    ),
+                    UserScript(
+                      source: _gestureInjectionScript,
                       injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
                     ),
                   ]),
@@ -893,50 +948,6 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
                     ),
                   ),
                 if (_errorMessage != null) _buildErrorWidget(),
-
-                // ── Phone gesture zone: bottom player bar (swipe ←/→ for tracks) ──
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  height: 90,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onHorizontalDragEnd: (details) {
-                      final velocity = details.primaryVelocity ?? 0;
-                      final dx = details.localPosition.dx - (screenSize.width / 2);
-                      if (velocity.abs() > _kSwipeVelocityThreshold ||
-                          dx.abs() > _kSwipeThreshold) {
-                        if (velocity < 0) {
-                          // Swipe left → next
-                          _handlePlaybackControl('next');
-                          _showGestureHint('Next track ⏭');
-                        } else {
-                          // Swipe right → previous
-                          _handlePlaybackControl('previous');
-                          _showGestureHint('Previous track ⏮');
-                        }
-                      }
-                    },
-                  ),
-                ),
-
-                // ── Phone gesture zone: top edge (swipe ↓ to open Quick Tools) ──
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  top: 0,
-                  height: 36,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onVerticalDragEnd: (details) {
-                      final velocity = details.primaryVelocity ?? 0;
-                      if (velocity > _kSwipeVelocityThreshold) {
-                        _openSettingsSheet();
-                      }
-                    },
-                  ),
-                ),
 
                 // Movable & Floating Quick Access Button
                 Positioned(

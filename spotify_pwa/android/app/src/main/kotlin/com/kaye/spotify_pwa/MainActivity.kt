@@ -132,6 +132,57 @@ class MainActivity : FlutterActivity() {
     }
   }
 
+  private var volumeUpKeyDownTime = 0L
+  private var volumeDownKeyDownTime = 0L
+  private val LONG_PRESS_TIMEOUT = 600L
+
+  override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+    if (event.repeatCount == 0) {
+      if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) {
+        volumeUpKeyDownTime = System.currentTimeMillis()
+      } else if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN) {
+        volumeDownKeyDownTime = System.currentTimeMillis()
+      }
+    } else {
+      if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) {
+        if (System.currentTimeMillis() - volumeUpKeyDownTime > LONG_PRESS_TIMEOUT) {
+          volumeUpKeyDownTime = Long.MAX_VALUE // Prevent triggering multiple times
+          runOnUiThread {
+            audioMethodChannel?.invokeMethod("onVolumeLongPress", mapOf("action" to "next"))
+          }
+          return true
+        }
+      } else if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN) {
+        if (System.currentTimeMillis() - volumeDownKeyDownTime > LONG_PRESS_TIMEOUT) {
+          volumeDownKeyDownTime = Long.MAX_VALUE // Prevent triggering multiple times
+          runOnUiThread {
+            audioMethodChannel?.invokeMethod("onVolumeLongPress", mapOf("action" to "previous"))
+          }
+          return true
+        }
+      }
+    }
+    return super.onKeyDown(keyCode, event)
+  }
+
+  override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
+    if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) {
+      // If it was already consumed by long press, we don't want the OS to change volume
+      if (volumeUpKeyDownTime == Long.MAX_VALUE) {
+        volumeUpKeyDownTime = 0L
+        return true
+      }
+      volumeUpKeyDownTime = 0L
+    } else if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN) {
+      if (volumeDownKeyDownTime == Long.MAX_VALUE) {
+        volumeDownKeyDownTime = 0L
+        return true
+      }
+      volumeDownKeyDownTime = 0L
+    }
+    return super.onKeyUp(keyCode, event)
+  }
+
   override fun onDestroy() {
     equalizerBridge?.release()
     equalizerBridge = null
