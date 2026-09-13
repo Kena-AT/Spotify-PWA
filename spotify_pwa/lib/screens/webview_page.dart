@@ -11,6 +11,15 @@ import '../services/audio_service.dart';
 import '../services/analytics_service.dart';
 import '../services/deep_link_service.dart';
 import '../services/platform_service.dart';
+import '../services/equalizer_service.dart';
+import '../services/sleep_timer_service.dart';
+import '../services/cache_manager_service.dart';
+import '../services/keyboard_service.dart';
+import 'widgets/settings_bottom_sheet.dart';
+import 'widgets/equalizer_modal.dart';
+import 'widgets/sleep_timer_modal.dart';
+import 'widgets/cache_manager_modal.dart';
+import 'widgets/keyboard_shortcuts_dialog.dart';
 
 class SpotifyWebViewPage extends StatefulWidget {
   const SpotifyWebViewPage({super.key});
@@ -23,6 +32,12 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
     with WidgetsBindingObserver {
   InAppWebViewController? _webViewController;
   late final ConnectivityService _connectivityService;
+  late final EqualizerService _equalizerService;
+  late final SleepTimerService _sleepTimerService;
+  late final CacheManagerService _cacheManagerService;
+  late final KeyboardShortcutService _keyboardService;
+  final FocusNode _keyboardFocusNode = FocusNode();
+
   bool _isLoading = true;
   String? _errorMessage;
 
@@ -36,6 +51,31 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
 
     _connectivityService = ConnectivityService();
     _connectivityService.addListener(_onConnectivityChanged);
+
+    _equalizerService = EqualizerService();
+    _sleepTimerService = SleepTimerService();
+    _cacheManagerService = CacheManagerService();
+    _keyboardService = KeyboardShortcutService(onAction: _handleShortcutAction);
+
+    _sleepTimerService.onFadeVolume = (fraction) {
+      _webViewController?.evaluateJavascript(source: '''
+        (function() {
+          document.querySelectorAll('audio, video').forEach(el => {
+            el.volume = $fraction;
+          });
+        })();
+      ''');
+    };
+
+    _sleepTimerService.onTimerFinished = () {
+      _handlePlaybackControl('pause');
+    };
+
+    _equalizerService.addListener(() {
+      _webViewController?.evaluateJavascript(
+        source: _equalizerService.webAudioFilterScript,
+      );
+    });
 
     _initLastConnectivity();
     _setupAudioService();
@@ -110,6 +150,10 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
     WidgetsBinding.instance.removeObserver(this);
     _connectivityService.removeListener(_onConnectivityChanged);
     _connectivityService.dispose();
+    _sleepTimerService.dispose();
+    _equalizerService.dispose();
+    _cacheManagerService.dispose();
+    _keyboardFocusNode.dispose();
     AudioService.stopBackgroundAudio();
     super.dispose();
   }
@@ -687,6 +731,12 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
             !title.toLowerCase().contains('advertisement');
 
         if (hasValidTitle) {
+          _sleepTimerService.onPlaybackMetadataUpdated(
+            title: title,
+            isPlaying: isPlaying,
+            position: data['position'] != null ? (data['position'] as num).toInt() : null,
+            duration: data['duration'] != null ? (data['duration'] as num).toInt() : null,
+          );
           AnalyticsService.logPlaybackStateChanged(title: title, isPlaying: isPlaying);
           AudioService.updatePlaybackState(
             title: title,
@@ -719,10 +769,14 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
       },
       child: Scaffold(
         backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-        body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.only(top: 8.0),
-            child: Stack(
+        body: KeyboardListener(
+          focusNode: _keyboardFocusNode,
+          autofocus: true,
+          onKeyEvent: (event) => _keyboardService.handleKeyEvent(event),
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: Stack(
               children: [
                 InAppWebView(
                   initialUrlRequest: URLRequest(url: WebUri('https://open.spotify.com')),
@@ -733,7 +787,9 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
                     javaScriptEnabled: true,
                     domStorageEnabled: true,
                     databaseEnabled: true,
-                    cacheMode: CacheMode.LOAD_DEFAULT,
+                    cacheMode: _cacheManagerService.isOfflineMode
+                        ? CacheMode.LOAD_CACHE_ONLY
+                        : CacheMode.LOAD_DEFAULT,
                     userAgent:
                         'Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
                     contentBlockers: _buildAdBlockContentBlockers(),
@@ -771,6 +827,9 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
                   onLoadStop: (controller, url) async {
                     _loadingTimeout?.cancel();
                     setState(() => _isLoading = false);
+                    controller.evaluateJavascript(
+                      source: _equalizerService.webAudioFilterScript,
+                    );
                   },
                   onReceivedError: (controller, request, error) {
                     if (request.isForMainFrame == true) {
@@ -823,10 +882,177 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
                     ),
                   ),
                 if (_errorMessage != null) _buildErrorWidget(),
+
+                // Floating Quick Access Button
+                Positioned(
+                  top: 10,
+                  right: 12,
+                  child: _buildFloatingQuickToolsButton(),
+                ),
               ],
             ),
           ),
         ),
+      ),
+    ),
+  );
+}
+
+  Widget _buildFloatingQuickToolsButton() {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: _openSettingsSheet,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xDD181818),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0x661DB954), width: 1),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black54,
+                blurRadius: 8,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.tune, color: Color(0xFF1DB954), size: 16),
+              ListenableBuilder(
+                listenable: _sleepTimerService,
+                builder: (context, _) {
+                  if (_sleepTimerService.state.isActive) {
+                    return Padding(
+                      padding: const EdgeInsets.only(left: 6.0),
+                      child: Text(
+                        _sleepTimerService.state.formattedRemaining,
+                        style: const TextStyle(
+                          color: Colors.orangeAccent,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    );
+                  }
+                  return const SizedBox.shrink();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleShortcutAction(ShortcutAction action) {
+    switch (action) {
+      case ShortcutAction.togglePlayPause:
+        _webViewController?.evaluateJavascript(source: '''
+          (function() {
+            var btn = document.querySelector('[data-testid="control-button-playpause"]') ||
+                      document.querySelector('button[aria-label="Play"]') ||
+                      document.querySelector('button[aria-label="Pause"]');
+            if (btn) btn.click();
+          })();
+        ''');
+        break;
+      case ShortcutAction.nextTrack:
+        _handlePlaybackControl('next');
+        break;
+      case ShortcutAction.previousTrack:
+        _handlePlaybackControl('previous');
+        break;
+      case ShortcutAction.volumeUp:
+        _webViewController?.evaluateJavascript(source: '''
+          (function() {
+            document.querySelectorAll('audio, video').forEach(el => {
+              el.volume = Math.min(1.0, (el.volume || 1.0) + 0.1);
+            });
+          })();
+        ''');
+        break;
+      case ShortcutAction.volumeDown:
+        _webViewController?.evaluateJavascript(source: '''
+          (function() {
+            document.querySelectorAll('audio, video').forEach(el => {
+              el.volume = Math.max(0.0, (el.volume || 1.0) - 0.1);
+            });
+          })();
+        ''');
+        break;
+      case ShortcutAction.toggleMute:
+        _webViewController?.evaluateJavascript(source: '''
+          (function() {
+            document.querySelectorAll('audio, video').forEach(el => {
+              el.muted = !el.muted;
+            });
+          })();
+        ''');
+        break;
+      case ShortcutAction.openSleepTimer:
+        _openSleepTimerModal();
+        break;
+      case ShortcutAction.openEqualizer:
+        _openEqualizerModal();
+        break;
+      case ShortcutAction.openCacheManager:
+        _openCacheManagerModal();
+        break;
+      case ShortcutAction.showShortcutsHelp:
+        showDialog(
+          context: context,
+          builder: (_) => const KeyboardShortcutsDialog(),
+        );
+        break;
+    }
+  }
+
+  void _openSettingsSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => SettingsBottomSheet(
+        equalizerService: _equalizerService,
+        sleepTimerService: _sleepTimerService,
+        cacheManagerService: _cacheManagerService,
+        webViewController: _webViewController,
+        onReloadRequested: () => _webViewController?.reload(),
+      ),
+    );
+  }
+
+  void _openEqualizerModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => EqualizerModal(equalizerService: _equalizerService),
+    );
+  }
+
+  void _openSleepTimerModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => SleepTimerModal(sleepTimerService: _sleepTimerService),
+    );
+  }
+
+  void _openCacheManagerModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => CacheManagerModal(
+        cacheManagerService: _cacheManagerService,
+        webViewController: _webViewController,
+        onOfflineModeChanged: () => _webViewController?.reload(),
       ),
     );
   }

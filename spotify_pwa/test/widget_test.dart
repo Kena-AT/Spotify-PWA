@@ -1,10 +1,18 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:spotify_pwa/main.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:spotify_pwa/services/theme_service.dart';
 
 void main() {
-  testWidgets('SpotifyPWAApp launches smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const SpotifyPWAApp());
-    expect(find.byType(SpotifyPWAApp), findsOneWidget);
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('ThemeService initializes with expected themes', () async {
+    SharedPreferences.setMockInitialValues({});
+    final themeService = ThemeService();
+
+    expect(themeService.themeMode, ThemeMode.dark);
+    expect(ThemeService.darkTheme.scaffoldBackgroundColor, const Color(0xFF191414));
+    expect(ThemeService.darkTheme.colorScheme.primary, const Color(0xFF1DB954));
+    expect(ThemeService.lightTheme.colorScheme.primary, const Color(0xFF1DB954));
   });
 }

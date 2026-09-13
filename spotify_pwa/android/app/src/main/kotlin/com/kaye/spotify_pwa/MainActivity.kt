@@ -12,8 +12,15 @@ class MainActivity : FlutterActivity() {
     var audioMethodChannel: MethodChannel? = null
   }
 
+  private var equalizerBridge: EqualizerBridge? = null
+
   override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
     super.configureFlutterEngine(flutterEngine)
+
+    // Setup equalizer bridge
+    equalizerBridge = EqualizerBridge(this).apply {
+      registerWith(flutterEngine.dartExecutor.binaryMessenger)
+    }
 
     // Setup audio method channel
     audioMethodChannel = MethodChannel(
@@ -126,6 +133,8 @@ class MainActivity : FlutterActivity() {
   }
 
   override fun onDestroy() {
+    equalizerBridge?.release()
+    equalizerBridge = null
     audioMethodChannel = null
     stopAudioService()
     super.onDestroy()
