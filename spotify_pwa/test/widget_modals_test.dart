@@ -23,6 +23,8 @@ void main() {
 
     // Switch to PC mode and verify PC shortcuts are shown
     await tester.tap(find.text('PC / Desktop'));
+    // Pump past the reverse animation (200ms) and the forward animation (200ms)
+    await tester.pump(const Duration(milliseconds: 250));
     await tester.pumpAndSettle();
 
     expect(find.text('PC / Desktop Shortcuts'), findsOneWidget);
