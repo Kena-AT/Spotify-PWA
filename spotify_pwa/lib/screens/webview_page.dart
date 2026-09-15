@@ -37,6 +37,7 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
   late final CacheManagerService _cacheManagerService;
   late final KeyboardShortcutService _keyboardService;
   final FocusNode _keyboardFocusNode = FocusNode();
+  Offset? _floatingButtonOffset;
 
   bool _isLoading = true;
   String? _errorMessage;
@@ -749,14 +750,75 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
         } else if (!isPlaying) {
           AudioService.stopBackgroundAudio();
         }
+      } else if (data['type'] == 'gesture') {
+        final action = data['action'];
+        if (action == 'swipe_left') {
+          _handlePlaybackControl('next');
+          _showGestureHint('Next track ⏭');
+        } else if (action == 'swipe_right') {
+          _handlePlaybackControl('previous');
+          _showGestureHint('Previous track ⏮');
+        } else if (action == 'swipe_down') {
+          _openSettingsSheet();
+        }
       }
     } catch (e) {
-      debugPrint('Error parsing playback state: $e');
+      debugPrint('Error parsing playback/gesture state: $e');
     }
   }
 
+  static const String _gestureInjectionScript = r'''
+  (function() {
+    let startX = 0;
+    let startY = 0;
+    
+    document.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        startX = e.touches[0].clientX;
+        startY = e.touches[0].clientY;
+      }
+    }, {passive: true});
+
+    document.addEventListener('touchend', (e) => {
+      if (e.changedTouches.length === 1) {
+        const endX = e.changedTouches[0].clientX;
+        const endY = e.changedTouches[0].clientY;
+        const diffX = endX - startX;
+        const diffY = endY - startY;
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        
+        // Swipe down from top 80px (for Quick Tools)
+        if (startY < 80 && diffY > 60 && Math.abs(diffX) < 60) {
+          if (window.flutter_inappwebview) {
+            window.flutter_inappwebview.callHandler('NativeChannel', JSON.stringify({ type: 'gesture', action: 'swipe_down' }));
+          }
+        }
+        
+        // Swipe left/right on bottom 120px (player bar area)
+        if (startY > h - 120 && Math.abs(diffX) > 60 && Math.abs(diffY) < 60) {
+          if (window.flutter_inappwebview) {
+            if (diffX < 0) {
+              window.flutter_inappwebview.callHandler('NativeChannel', JSON.stringify({ type: 'gesture', action: 'swipe_left' }));
+            } else {
+              window.flutter_inappwebview.callHandler('NativeChannel', JSON.stringify({ type: 'gesture', action: 'swipe_right' }));
+            }
+          }
+        }
+      }
+    }, {passive: true});
+  })();
+  ''';
+
   @override
   Widget build(BuildContext context) {
+    final screenSize = MediaQuery.sizeOf(context);
+    final defaultOffset = Offset(
+      screenSize.width > 80 ? screenSize.width - 76 : 16,
+      12,
+    );
+    final currentOffset = _floatingButtonOffset ?? defaultOffset;
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (bool didPop, dynamic result) async {
@@ -801,6 +863,10 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
                     ),
                     UserScript(
                       source: _playbackBridgeScript,
+                      injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+                    ),
+                    UserScript(
+                      source: _gestureInjectionScript,
                       injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
                     ),
                   ]),
@@ -883,11 +949,27 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
                   ),
                 if (_errorMessage != null) _buildErrorWidget(),
 
-                // Floating Quick Access Button
+                // Movable & Floating Quick Access Button
                 Positioned(
-                  top: 10,
-                  right: 12,
-                  child: _buildFloatingQuickToolsButton(),
+                  left: currentOffset.dx,
+                  top: currentOffset.dy,
+                  child: GestureDetector(
+                    onPanUpdate: (details) {
+                      setState(() {
+                        final newX = (currentOffset.dx + details.delta.dx).clamp(
+                          8.0,
+                          (screenSize.width - 70.0).clamp(8.0, double.infinity),
+                        );
+                        final newY = (currentOffset.dy + details.delta.dy).clamp(
+                          8.0,
+                          (screenSize.height - 60.0).clamp(8.0, double.infinity),
+                        );
+                        _floatingButtonOffset = Offset(newX, newY);
+                      });
+                    },
+                    onTap: _openSettingsSheet,
+                    child: _buildFloatingQuickToolsButton(),
+                  ),
                 ),
               ],
             ),
@@ -899,51 +981,46 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
 }
 
   Widget _buildFloatingQuickToolsButton() {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: _openSettingsSheet,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0xEE181818),
         borderRadius: BorderRadius.circular(20),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: const Color(0xDD181818),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0x661DB954), width: 1),
-            boxShadow: const [
-              BoxShadow(
-                color: Colors.black54,
-                blurRadius: 8,
-                offset: Offset(0, 2),
-              ),
-            ],
+        border: Border.all(color: const Color(0x881DB954), width: 1.2),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black54,
+            blurRadius: 10,
+            offset: Offset(0, 3),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.tune, color: Color(0xFF1DB954), size: 16),
-              ListenableBuilder(
-                listenable: _sleepTimerService,
-                builder: (context, _) {
-                  if (_sleepTimerService.state.isActive) {
-                    return Padding(
-                      padding: const EdgeInsets.only(left: 6.0),
-                      child: Text(
-                        _sleepTimerService.state.formattedRemaining,
-                        style: const TextStyle(
-                          color: Colors.orangeAccent,
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    );
-                  }
-                  return const SizedBox.shrink();
-                },
-              ),
-            ],
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.drag_indicator, color: Colors.white38, size: 14),
+          const SizedBox(width: 4),
+          const Icon(Icons.tune, color: Color(0xFF1DB954), size: 16),
+          ListenableBuilder(
+            listenable: _sleepTimerService,
+            builder: (context, _) {
+              if (_sleepTimerService.state.isActive) {
+                return Padding(
+                  padding: const EdgeInsets.only(left: 6.0),
+                  child: Text(
+                    _sleepTimerService.state.formattedRemaining,
+                    style: const TextStyle(
+                      color: Colors.orangeAccent,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                );
+              }
+              return const SizedBox.shrink();
+            },
           ),
-        ),
+        ],
       ),
     );
   }
@@ -1053,6 +1130,29 @@ class _SpotifyWebViewPageState extends State<SpotifyWebViewPage>
         cacheManagerService: _cacheManagerService,
         webViewController: _webViewController,
         onOfflineModeChanged: () => _webViewController?.reload(),
+      ),
+    );
+  }
+
+  void _showGestureHint(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+          ),
+          textAlign: TextAlign.center,
+        ),
+        backgroundColor: const Color(0xFF282828),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 100, left: 60, right: 60),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(milliseconds: 900),
+        elevation: 6,
       ),
     );
   }

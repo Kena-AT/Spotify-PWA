@@ -72,6 +72,9 @@ class AudioService {
       if (call.method == 'handlePlaybackControl') {
         final String action = call.arguments['action'];
         callback(action);
+      } else if (call.method == 'onVolumeLongPress') {
+        final String action = call.arguments['action'];
+        callback(action);
       }
       return null;
     });

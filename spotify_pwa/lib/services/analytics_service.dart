@@ -7,7 +7,7 @@ class AnalyticsService {
     final eventData = {
       'event': eventName,
       'timestamp': DateTime.now().toIso8601String(),
-      if (parameters != null) ...parameters,
+      ...?parameters,
     };
 
     debugPrint('[AnalyticsService] Event logged: $eventData');
