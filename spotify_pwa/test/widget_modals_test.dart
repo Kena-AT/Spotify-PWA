@@ -9,30 +9,39 @@ import 'package:spotify_pwa/services/sleep_timer_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('KeyboardShortcutsDialog renders all key shortcuts', (tester) async {
+  testWidgets('KeyboardShortcutsDialog renders all key shortcuts', (
+    tester,
+  ) async {
     await tester.pumpWidget(
-      const MaterialApp(
-        home: Scaffold(
-          body: KeyboardShortcutsDialog(),
-        ),
-      ),
+      const MaterialApp(home: Scaffold(body: KeyboardShortcutsDialog())),
     );
 
-    expect(find.text('Keyboard Shortcuts'), findsOneWidget);
+    // Dialog starts in phone mode — verify phone header and mode tabs are present
+    expect(find.text('Phone Shortcuts & Gestures'), findsOneWidget);
+    expect(find.text('Phone'), findsOneWidget);
+    expect(find.text('PC / Desktop'), findsOneWidget);
+
+    // Switch to PC mode and verify PC shortcuts are shown
+    await tester.tap(find.text('PC / Desktop'));
+    // Pump past the reverse animation (200ms) and the forward animation (200ms)
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+
+    expect(find.text('PC / Desktop Shortcuts'), findsOneWidget);
     expect(find.text('Play / Pause'), findsOneWidget);
     expect(find.text('Next track'), findsOneWidget);
     expect(find.text('Previous track'), findsOneWidget);
     expect(find.text('Space'), findsOneWidget);
   });
 
-  testWidgets('SleepTimerModal renders options and allows selecting timer', (tester) async {
+  testWidgets('SleepTimerModal renders options and allows selecting timer', (
+    tester,
+  ) async {
     final timerService = SleepTimerService();
 
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(
-          body: SleepTimerModal(sleepTimerService: timerService),
-        ),
+        home: Scaffold(body: SleepTimerModal(sleepTimerService: timerService)),
       ),
     );
 
@@ -51,14 +60,14 @@ void main() {
     timerService.dispose();
   });
 
-  testWidgets('EqualizerModal renders equalizer title, switch, and presets', (tester) async {
+  testWidgets('EqualizerModal renders equalizer title, switch, and presets', (
+    tester,
+  ) async {
     final eqService = EqualizerService();
 
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(
-          body: EqualizerModal(equalizerService: eqService),
-        ),
+        home: Scaffold(body: EqualizerModal(equalizerService: eqService)),
       ),
     );
 
